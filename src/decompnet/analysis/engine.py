@@ -44,6 +44,7 @@ class AnalysisEngine:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.catalog_cache = {}
         self.running: dict[str, tuple[threading.Thread, threading.Event]] = {}
         for path in self.root.glob("*/project.json"):
             try:
@@ -107,26 +108,64 @@ class AnalysisEngine:
 
     def snapshot(self, slug: str, details: bool = True) -> dict:
         data = self.metadata(slug)
-        functions, summary, complete = [], {}, False
-        path = self.directory(slug) / "functions.jsonl"
-        if path.exists():
+        functions, summary, complete, events, current = {}, {}, False, [], None
+        directory = self.directory(slug)
+        base = directory / "base-functions.jsonl"
+        paths = [base, directory / "functions.jsonl"]
+        for path in paths:
+            if not path.exists():
+                continue
             with path.open(encoding="utf-8") as f:
                 for line in f:
                     try:
                         row = json.loads(line)
                     except ValueError:
-                        continue  # writer may still be flushing the last record
-                    if row.get("type") == "summary":
+                        continue
+                    kind = row.get("type")
+                    if kind == "summary":
                         summary = row
-                    elif row.get("type") == "complete":
+                    elif kind == "complete":
                         complete = True
-                    elif row.get("type") == "function":
+                    elif kind == "started":
+                        current = row
+                        events.append(row)
+                    elif kind == "function":
+                        if path != base:
+                            events.append({k: row.get(k) for k in ("type", "name", "address", "status", "time")})
+                        if current and current["address"] == row["address"]:
+                            current = None
                         if not details:
                             row = {k: row[k] for k in ("name", "address", "relative_address", "size", "status")}
-                        functions.append(row)
-        return data | {"summary": summary, "functions": functions, "export_complete": complete,
-                       "exported": len(functions), "drafted": sum(f["status"] == "drafted" for f in functions),
-                       "failed": sum(f["status"] == "failed" for f in functions)}
+                        functions[row["address"]] = row
+        if not summary:
+            previous = directory / "previous-functions.jsonl"
+            if previous.exists():
+                with previous.open() as f:
+                    try:
+                        first = json.loads(f.readline())
+                        if first.get("type") == "summary":
+                            summary = first
+                    except ValueError:
+                        pass
+        catalog = directory / "catalog.json"
+        rows = list(functions.values())
+        return data | {"catalog_version": catalog.stat().st_mtime_ns if catalog.exists() else 0,
+                       "summary": summary, "functions": rows, "export_complete": complete,
+                       "current_function": current if data["state"] in ACTIVE else None,
+                       "events": events, "exported": len(rows),
+                       "drafted": sum(f["status"] == "drafted" for f in rows),
+                       "failed": sum(f["status"] == "failed" for f in rows)}
+
+    def catalog(self, slug: str) -> list[dict]:
+        path = self.directory(slug) / "catalog.json"
+        if not path.exists():
+            return [{k: f[k] for k in ("name", "address", "size")} for f in self.snapshot(slug, False)["functions"]]
+        stamp = path.stat().st_mtime_ns
+        cached = self.catalog_cache.get(slug)
+        if not cached or cached[0] != stamp:
+            cached = (stamp, json.loads(path.read_text()))
+            self.catalog_cache[slug] = cached
+        return cached[1]
 
     def tool_status(self) -> dict:
         base = toolchains.path("ghidra")
@@ -158,7 +197,7 @@ class AnalysisEngine:
             event = threading.Event()
             thread = threading.Thread(target=self._run, args=(slug, limit, event), daemon=True)
             self.running[slug] = (thread, event)
-            self.update(slug, state="queued", limit=limit, error=None)
+            self.update(slug, state="queued", limit=limit, error=None, job_started=time.time())
             thread.start()
         return self.snapshot(slug, details=False)
 
@@ -182,11 +221,21 @@ class AnalysisEngine:
             project_dir.mkdir(exist_ok=True)
             output = directory / "functions.jsonl"
             # Preserve the previous sample without presenting it as the new job's result.
+            previous = self.snapshot(slug)
+            offset = previous["exported"]
+            base = directory / "base-functions.jsonl"
+            base_tmp = base.with_suffix(".tmp")
+            with base_tmp.open("w", encoding="utf-8") as f:
+                if previous["summary"]:
+                    f.write(json.dumps(previous["summary"]) + "\n")
+                for row in previous["functions"]:
+                    f.write(json.dumps(row) + "\n")
+            base_tmp.replace(base)
             if output.exists():
                 output.replace(directory / "previous-functions.jsonl")
             script = Path(__file__).with_name("SwitchExport.java")
-            # A changed exporter/loader/tool release must not silently reuse old analysis.
-            fingerprint = hashlib.sha256(script.read_bytes())
+            # Loader/tool changes invalidate saved analysis. Exporter changes can reuse the program.
+            fingerprint = hashlib.sha256(b"switch-analysis-v2")
             fingerprint.update(toolchains.get("ghidra").source.encode())
             for jar in sorted(toolchains.path("ghidra").glob("Ghidra/Extensions/*Switch*/lib/*.jar")):
                 with jar.open("rb") as f:
@@ -197,8 +246,8 @@ class AnalysisEngine:
             argv = [str(toolchains.path("ghidra") / "support" / "analyzeHeadless"), str(project_dir), "switch"]
             argv += ["-process", source.name, "-noanalysis"] if resumed else ["-import", str(source), "-overwrite"]
             argv += ["-analysisTimeoutPerFile", "300", "-max-cpu", "2", "-scriptPath", str(script.parent),
-                     "-postScript", script.name, str(output), str(limit)]
-            self.update(slug, state="analyzing", analysis_scope="bounded discovery; up to 300 seconds")
+                     "-postScript", script.name, str(output), str(limit), str(offset)]
+            self.update(slug, state="analyzing", batch_offset=offset, phase="Opening saved program" if resumed else "Loading module and discovering functions", analysis_scope="bounded discovery; up to 300 seconds")
             started = time.monotonic()
             started_wall = time.time()
             # JAVA_TOOL_OPTIONS applies to the JVM, not the user's shell or system configuration.
@@ -218,11 +267,11 @@ class AnalysisEngine:
                         self.update(slug, state="error", error="Analysis exceeded the 15-minute job limit; partial results retained.")
                         return
                     if output.exists() and self.metadata(slug)["state"] == "analyzing":
-                        self.update(slug, state="drafting")
+                        self.update(slug, state="drafting", phase="Decompiling functions")
                 result = self.snapshot(slug)
                 if proc.returncode or not result["export_complete"] or not output.exists() or output.stat().st_mtime < started_wall:
                     raise InputError("Ghidra did not finish the export; inspect the project's analysis.log")
-            self.update(slug, state="completed", analysis_saved=True, error=None,
+            self.update(slug, state="completed", phase="Batch complete", analysis_saved=True, error=None,
                         analysis_signature=signature,
                         discovery_timed_out=(data.get("discovery_timed_out", False) if resumed else
                                              "REPORT: Analysis timed out" in (directory / "analysis.log").read_text(errors="replace")),

@@ -81,6 +81,8 @@ async function loadState() { S.st = await api("/api/state"); $("navVersion").tex
 
 function route() {
   const h = location.hash;
+  if (h.startsWith("#/analysis/") || h === "#/switch") { routeAnalysis(h); return; }
+  restoreAnalysisUI();
   const m = h.match(/^#\/p\/([\w-]+)(?:\/(\w+))?/);
   closeAll();
   closeNav();
@@ -118,18 +120,22 @@ function setWidths(root) { root.querySelectorAll("[data-w]").forEach((el) => { e
 
 function markNav() {
   const h = location.hash || "#/";
-  const route = h.startsWith("#/p/") ? "project" : (h.replace("#/", "") || "home");
+  const route = (h.startsWith("#/p/") || h.startsWith("#/analysis/")) ? "project" : (h.replace("#/", "") || "home");
   document.querySelectorAll(".nav [data-route]").forEach((a) => a.classList.toggle("on", a.dataset.route === route));
   document.querySelectorAll(".nav-proj").forEach((a) => a.classList.toggle("on", a.dataset.slug === S.slug && route === "project"));
 }
 async function loadNav() {
-  try { S.projects = await api("/api/projects"); } catch { return; }
+  try {
+    const [normal, analysis] = await Promise.all([api("/api/projects"), api("/api/switch/projects")]);
+    S.projects = [...normal, ...analysis.projects];
+  } catch { return; }
   renderNav();
 }
 function renderNav() {
   const box = $("navProjects");
   if (!S.projects.length) { box.innerHTML = `<p class="nav-empty">None yet: drop in a game.</p>`; return; }
   box.innerHTML = S.projects.map((p) => {
+    if (p.kind === "analysis") return analysisNav(p);
     const pct = p.bytes ? (100 * p.matched_bytes) / p.bytes : 0;
     const short = PLAT_SHORT[p.platform] || (p.platform_name || "").replace("Nintendo ", "") || "?";
     const state = p.working ? `<span class="dot on" title="${p.working} agent${p.working === 1 ? "" : "s"} working"></span>`
@@ -158,9 +164,10 @@ async function showHome() {
   resetDrop();
   const st = await loadState();
   loadCatalog().then((c) => { if (c.length) $("forkCount").textContent = c.length.toLocaleString(); }).catch(() => {});
+  const switchProjects = (await api("/api/switch/projects")).projects;
   const box = $("projects");
-  box.innerHTML = "";
-  $("recent").hidden = !st.projects.length;
+  box.innerHTML = switchProjects.map(analysisCard).join("");
+  $("recent").hidden = !st.projects.length && !switchProjects.length;
   for (const p of st.projects) {
     const pct = p.bytes ? (100 * p.matched_bytes) / p.bytes : 0;
     const a = document.createElement("a");
@@ -461,6 +468,7 @@ function stopPolling() {
 }
 
 function setTab(tab) {
+  if (S.ov?.kind === "analysis") { setAnalysisTab(tab); return; }
   if (!TABS.includes(tab)) tab = "overview";
   S.tab = tab;
   document.querySelectorAll("#ptabs [data-ptab]").forEach((a) => { a.classList.toggle("on", a.dataset.ptab === tab); a.setAttribute("aria-selected", a.dataset.ptab === tab); });
@@ -478,7 +486,7 @@ document.querySelectorAll("[data-goto]").forEach((a) => {
   a.onclick = (e) => {
     e.preventDefault();
     if (a.dataset.filter) { L.filter = a.dataset.filter; L.limit = 200; }
-    location.hash = `#/p/${S.slug}/${a.dataset.goto}`;
+    location.hash = `#/${S.ov?.kind === "analysis" ? "analysis" : "p"}/${S.slug}/${a.dataset.goto}`;
   };
 });
 
@@ -1104,7 +1112,7 @@ function cssColor(name) {
   return rgb;
 }
 function readColors() {
-  colors = { open: cssColor("--open"), tried: cssColor("--tried"), work: cssColor("--work"), match: cssColor("--match"), hi: cssColor("--match-hi"), ink: cssColor("--ink") };
+  colors = { draft: cssColor("--move"), fail: cssColor("--miss"), open: cssColor("--open"), tried: cssColor("--tried"), work: cssColor("--work"), match: cssColor("--match"), hi: cssColor("--match-hi"), ink: cssColor("--ink") };
 }
 const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
 const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -1127,6 +1135,7 @@ function layoutMap() {
 }
 
 function applyClaims(draw = true) {
+  if (S.ov?.kind === "analysis") { if (draw) drawMap(); return; }
   const working = new Map(S.claims.map((c) => [c.name, c.agent]));
   for (const f of S.map) {
     if (f.status !== "matched" && f.status !== "asm") f.status = working.has(f.name) ? "working" : "open";
@@ -1146,6 +1155,7 @@ function drawMap() {
   const ctx = $("map").getContext("2d");
   const { size, gap, cols, dpr } = geo;
   const now = performance.now();
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, geo.w, geo.h);
   const r = size >= 10 ? 2.5 : size >= 7 ? 1.5 : 1;
@@ -1153,9 +1163,11 @@ function drawMap() {
   S.map.forEach((f, i) => {
     const x = (i % cols) * (size + gap), y = Math.floor(i / cols) * (size + gap);
     let c, a = 1;
-    if (f.status === "matched") c = colors.match;
+    if (f.status === "drafted") c = colors.draft;
+    else if (f.status === "failed") c = colors.fail;
+    else if (f.status === "matched") c = colors.match;
     else if (f.status === "asm") { c = colors.tried; a = 0.35; }
-    else if (f.status === "working") { c = colors.work; a = 0.55 + 0.45 * Math.sin(now / 260 + i); live = true; }
+    else if (f.status === "working") { c = colors.work; a = reducedMotion ? 1 : 0.55 + 0.45 * Math.sin(now / 260 + i); live = !reducedMotion; }
     else if (f.best != null) c = mix(colors.tried, colors.hi, Math.pow(pctOf(f.best, f.insns) || 0, 3));
     else c = colors.open;
     ctx.fillStyle = rgb(c, a);
@@ -1163,10 +1175,10 @@ function drawMap() {
     const fl = S.flash.get(f.name);
     if (fl) {
       const t = (now - fl) / 1600;
-      if (t < 1) {
+      if (t < 1 && !reducedMotion) {
         live = true;
         const g = size * (0.6 + 1.8 * t);
-        ctx.strokeStyle = rgb(colors.match, 1 - t);
+        ctx.strokeStyle = rgb(S.ov?.kind === "analysis" ? colors.draft : colors.match, 1 - t);
         ctx.lineWidth = 2;
         ctx.beginPath(); ctx.roundRect(x - g / 2, y - g / 2, size + g, size + g, r + 2); ctx.stroke();
       } else S.flash.delete(f.name);
@@ -1190,6 +1202,7 @@ $("map").addEventListener("mousemove", (ev) => {
   if (i < 0) { tip.hidden = true; return; }
   const f = S.map[i];
   const p = pctOf(f.best, f.insns);
+  if (S.ov?.kind === "analysis") { analysisMapTip(f, ev); return; }
   const status = f.status === "matched" ? `matched${f.matched_by ? " by " + esc(f.matched_by) : ""}` : f.status === "working" ? `${esc(f.agent)} is on it` : f.best != null ? `best ${pctText(p)}` : "not started";
   const where = S.ov && S.ov.kind === "fork" ? esc(f.unit || "") : hex8(f.vram);
   tip.innerHTML = `<b>${esc(f.name)}</b><br>${where} · ${f.insns} instructions<br>${status}`;
@@ -1545,6 +1558,7 @@ function highlightC(text) {
 }
 
 async function openFn(name) {
+  if (S.ov?.kind === "analysis") return openAnalysisFunction(name);
   const again = S.fn === name && !$("drawer").hidden;
   if (!again) { giveBack(name); S.editDirty = false; $("tryMsg").hidden = true; }
   S.fn = name;
@@ -1581,6 +1595,7 @@ document.querySelectorAll("#diffWhich [data-which]").forEach((b) => {
 
 let fnBusy = false;
 async function refreshFn(first) {
+  if (S.ov?.kind === "analysis") return;
   if (fnBusy || !S.fn) return;
   fnBusy = true;
   try {
@@ -1656,6 +1671,7 @@ $("fnEdit").addEventListener("keydown", (e) => {
 $("tryBtn").onclick = () => tryIt();
 
 async function tryIt() {
+  if (S.ov?.kind === "analysis") return;
   const name = S.fn, source = $("fnEdit").value, msg = $("tryMsg");
   if (!name || !source.trim() || $("tryBtn").disabled) return;
   $("tryBtn").disabled = true;
@@ -1682,6 +1698,7 @@ async function tryIt() {
 }
 /* The function stays yours only while you're on it: give it back when you move on. */
 function giveBack(next) {
+  if (S.ov?.kind === "analysis") return;
   if (S.myClaim && S.myClaim !== next && S.slug) {
     api("/api/release", { method: "POST", body: { slug: S.slug, name: S.myClaim } }).catch(() => {});
     S.myClaim = null;
@@ -1806,6 +1823,7 @@ const fnState = (f) => (f.status === "matched" ? "matched" : f.status === "asm" 
 const STATE_RANK = { working: 0, tried: 1, open: 2, matched: 3, asm: 4 };
 
 function renderList() {
+  if (S.ov?.kind === "analysis") { renderAnalysisList(); return; }
   if (!S.map.length || S.tab !== "functions") return;
   const counts = { all: S.map.length, open: 0, working: 0, tried: 0, matched: 0, asm: 0 };
   for (const f of S.map) counts[fnState(f)]++;
@@ -1889,7 +1907,7 @@ document.addEventListener("keydown", (e) => {
   if (!$("drawer").hidden && (e.key === "j" || e.key === "k")) { e.preventDefault(); stepFn(e.key === "j" ? 1 : -1); return; }
   if (e.key === "/" && S.slug && $("drawer").hidden) {
     e.preventDefault();
-    if (S.tab !== "functions") location.hash = `#/p/${S.slug}/functions`;
+    if (S.tab !== "functions") location.hash = `#/${S.ov?.kind === "analysis" ? "analysis" : "p"}/${S.slug}/functions`;
     setTimeout(() => $("fnSearch").focus(), 50);
   }
 });

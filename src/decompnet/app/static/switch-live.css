@@ -1,0 +1,18 @@
+/* Inherit the original app's Geist typography, theme tokens and panel layout. */
+.analysis-project #phStart,.analysis-project #phFolder,.analysis-project #phWorking,.analysis-project #phRoom,
+.analysis-project #nextStep,.analysis-project #autopilot,.analysis-project .kpi:first-child .num small,
+.analysis-project #drawer .fn-tabs,.analysis-project #fnChartWrap,.analysis-project #fnPin,
+.analysis-project #drawer .edit-bar,.analysis-project #drawer #fnNotes{display:none!important}
+#analysisActions{flex-wrap:wrap}#analysisBatch{width:80px;padding:7px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+#analysisLive{margin-bottom:20px}#analysisLive.running .ap-icon{animation:analysis-pulse 1.2s ease-in-out infinite}
+.sw.draft,.analysis-draft-stack{background:var(--move)}.sw.failed{background:var(--miss)}
+.analysis-project #board li{display:flex;flex-direction:column;gap:6px}.analysis-project #recentMatches li{display:flex;justify-content:space-between;gap:12px}
+.analysis-project #fnXref{display:flex;flex-wrap:wrap;gap:12px}
+@keyframes analysis-pulse{50%{opacity:.3}}
+@media(prefers-reduced-motion:reduce){#analysisLive.running .ap-icon{animation:none}}
+@media(max-width:760px){#analysisActions{gap:8px}#analysisLive{flex-wrap:wrap}.analysis-project #recentMatches button{overflow-wrap:anywhere;text-align:left}}
+
+.analysis-project .map-wrap{max-height:460px;overflow:auto}
+
+.analysis-project .ph-progress .meter i{background:var(--move)}
+#analysisLive.running .ap-icon{background:var(--work)}

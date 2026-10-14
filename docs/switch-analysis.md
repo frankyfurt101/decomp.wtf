@@ -1,24 +1,29 @@
 # Switch analysis and New Horizons roadmap
 
-Status: experimental local analysis implemented. NSO and AArch64 ELF import, persistent Ghidra projects, bounded C-like drafts, assembly, direct calls, and a visual function map are available at `/switch`. Compiler matching, NRO import, agent-assisted reconstruction, and game export remain future work.
+Status: experimental local analysis implemented. NSO and AArch64 ELF import, persistent Ghidra projects, bounded C-like drafts, assembly, direct calls, and a visual function map are integrated into the original application at `/#/switch` (`/switch` redirects there). Compiler matching, NRO import, agent-assisted reconstruction, and game export remain future work.
 
 
 ## Run the analysis preview
 
 Run `decomp` from this checkout and choose **Switch analysis** in the sidebar. Supply an extracted NSO `main`,
-an ExeFS folder containing `main`, or a linked AArch64 ELF. Confirm ownership, then analyze a sample of 1–500
-functions. The default is 64. Inputs are copied into `DECOMP_HOME/switch-analysis/<sha256>/`; the original
+an ExeFS folder containing `main`, or a linked AArch64 ELF. Confirm ownership, then click **Continue decompiling** for a batch of 1–500
+functions. The UI defaults to 500. Each batch skips addresses already attempted and retains earlier drafts. Inputs are copied into `DECOMP_HOME/switch-analysis/<sha256>/`; the original
 file is left untouched. NSP files receive an extraction-required message. This feature does not process keys.
 
 The worker uses at most two analysis CPUs, a 2 GiB Java heap, 300 seconds of automatic discovery, 20 seconds
 per function, and a 15-minute overall job limit. These are task limits, not a claim of total process-memory
 isolation. Cancel stops the worker process group. App interruption is reported on the next launch.
-A finished project's Ghidra database can be reused; changing the exporter, loader JARs, or registered Ghidra
-release invalidates reuse. `functions.jsonl` streams partial results; failed attempts retain their logs.
-The previous sample is preserved as `previous-functions.jsonl` on rerun.
+A finished project's Ghidra database can be reused; changing loader JARs or the registered Ghidra
+release invalidates reuse. Exporter-only changes reuse the saved program. `functions.jsonl` streams partial results; failed attempts retain their logs.
+Cumulative results are retained in `base-functions.jsonl`; the previous batch is also preserved as `previous-functions.jsonl`.
+
+The original sidebar, theme, canvas, Functions and Activity views, and code drawer are reused. The map shows
+all discovered internal functions, including those not yet drafted. Real `started` and completed-function events
+drive amber pulses, blue completion rings, counts and the activity feed. During discovery the worker banner
+shows the actual phase; no function activity is simulated. An idle worker produces no work animation.
 
 **Counts are analysis results, not game-completion percentages.** Discovered functions depend on bounded
-Ghidra analysis; sampled functions are the first nonexternal functions in address order. C-like drafts may
+Ghidra analysis; batches visit remaining nonexternal functions in address order. C-like drafts may
 be wrong or incomplete. Verified matches remain zero. These projects are separate from the matching engine
 and cannot be claimed by matching agents or exported as rebuildable games.
 
@@ -194,14 +199,22 @@ are complete.
 ## Local acceptance record — October 14, 2026
 
 - Original AArch64 ELF and NSO fixtures each yielded three discovered functions and three drafts.
-  The NSO retained the expected `_start`, `clamp_value`, and `checksum` symbols, two direct call links from
-  `_start`, and image base `0x7100000000`. Reanalysis reused the saved Ghidra project successfully.
+  The NSO retained `_start`, `clamp_value`, and `checksum`, two call links from `_start`, and image
+  base `0x7100000000`. A fresh continuation check drafted one function, then two additional functions,
+  retained all three, streamed start/completion events, and reused the saved program on the second batch.
 - A privately held New Horizons 1.0.0 main module, SHA-256
-  `f8d248109ff72999b4600ae3749f8c7397fb960f7ad3ab8dee3018ae9e14e900`, yielded **49,241 discovered functions**
-  before the 300-second discovery limit, followed by **64 sampled functions / 64 drafts / 0 sample failures**.
-  Verified compiler matches: **0**. Discovery is partial, and some analyzers logged warnings.
-- Browser checks passed for function selection, assembly/draft tabs, search hits/misses, a 390-pixel mobile
-  viewport without horizontal overflow, and absence of JavaScript errors. The local app retains the results.
+  `f8d248109ff72999b4600ae3749f8c7397fb960f7ad3ab8dee3018ae9e14e900`, reached **1,064 saved drafts / 0 failures**
+  over successive batches. The latest bounded discovery found **49,363 functions**, including
+  **48,487 internal functions** represented on the map. Discovery is partial; its inventory can change
+  when rerun. Verified compiler matches: **0**.
+- The initial separate Switch screen was replaced with integration into the original app's sidebar,
+  project header, canvas, Functions/Activity tabs, themes and assembly/C drawer. A browser recording
+  captured an actual batch advancing from **564 to 1,064** drafts, with active-function pulses and
+  completion rings driven by worker events. No mock job or synthetic function events were used.
+- Browser checks passed for function filtering, 64-bit address search, assembly/C selection, read-only
+  drafts, search hits/misses, activity navigation, dark theme, project/home navigation, and a 390-pixel
+  viewport without horizontal overflow. No JavaScript errors were observed.
+- Targeted Python tests: **28 passed, 3 skipped**; the skips are existing environment-dependent checks.
 - No game binaries, generated game drafts, assets, keys, or Ghidra databases are included in this repository.
 
 These results qualify a local analysis preview. They do not establish a complete decompilation, native port,

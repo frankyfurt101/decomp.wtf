@@ -1,8 +1,6 @@
 """Authenticated local UI/API for analysis projects, with no matching endpoints."""
-from pathlib import Path
-
 import anyio
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
 from .engine import AnalysisEngine
 from .inputs import InputError
@@ -13,7 +11,7 @@ def register(mcp, home, guard, static):
 
     @mcp.custom_route("/switch", methods=["GET"])
     async def page(request):
-        return guard(request) or HTMLResponse(static("switch.html").decode())
+        return guard(request) or RedirectResponse("/#/switch", status_code=303)
 
     @mcp.custom_route("/api/switch/projects", methods=["GET"])
     async def projects(request):
@@ -31,6 +29,15 @@ def register(mcp, home, guard, static):
         except (InputError, OSError, ValueError) as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
+    @mcp.custom_route("/api/switch/map", methods=["GET"])
+    async def catalog(request):
+        if bad := guard(request):
+            return bad
+        try:
+            return JSONResponse(await anyio.to_thread.run_sync(engine.catalog, request.query_params.get("id", "")))
+        except (InputError, OSError, ValueError) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
     @mcp.custom_route("/api/switch/function", methods=["GET"])
     async def function(request):
         if bad := guard(request):
@@ -40,7 +47,7 @@ def register(mcp, home, guard, static):
             address = request.query_params.get("address", "")
             row = next((f for f in project["functions"] if f["address"] == address), None)
             if row is None:
-                raise InputError("function is not in this analysis sample")
+                raise InputError("function has not been drafted yet")
             return JSONResponse(row)
         except (InputError, OSError, ValueError) as e:
             return JSONResponse({"error": str(e)}, status_code=400)

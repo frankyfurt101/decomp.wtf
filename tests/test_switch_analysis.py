@@ -143,13 +143,14 @@ def test_routes_share_auth_and_do_not_enter_matching_database(tmp_path, nso):
     mcp, _, security = build(net, state, 6499, 'test-only-secret')
     app = mcp.streamable_http_app(transport_security=security, host='127.0.0.1')
     client = TestClient(app, base_url='http://127.0.0.1:6499')
-    for route in ('/switch', '/api/switch/projects', '/api/switch/project?id=x', '/api/switch/function?id=x'):
+    for route in ('/switch', '/api/switch/projects', '/api/switch/project?id=x', '/api/switch/map?id=x', '/api/switch/function?id=x'):
         assert client.get(route).status_code == 401
     client.cookies.set('decomp_live', 'test-only-secret')
     redirect = client.get('/?k=test-only-secret&view=switch', follow_redirects=False)
     assert redirect.status_code == 303 and redirect.headers['location'] == '/switch'
     redirect = client.get('/?k=test-only-secret&view=https://evil.example', follow_redirects=False)
     assert redirect.headers['location'] == '/'
+    assert client.get('/switch', follow_redirects=False).headers['location'] == '/#/switch'
     assert client.get('/switch').status_code == 200
     payload = {'path': str(nso), 'confirmed': True}
     assert client.post('/api/switch/import', json=payload).status_code == 403
@@ -159,6 +160,7 @@ def test_routes_share_auth_and_do_not_enter_matching_database(tmp_path, nso):
     assert r.status_code == 200, r.text
     slug = r.json()['slug']
     assert client.get('/api/switch/project', params={'id': slug}).json()['state'] == 'imported'
+    assert client.get('/api/switch/map', params={'id': slug}).json() == []
     assert client.get('/api/state').json()['projects'] == []
     for invalid in (True, 0, 501, '64'):
         assert client.post('/api/switch/start', json={'id': slug, 'limit': invalid}, headers=h).status_code == 400
@@ -166,3 +168,54 @@ def test_routes_share_auth_and_do_not_enter_matching_database(tmp_path, nso):
     evil = TestClient(app, base_url='http://evil.example:6499')
     evil.cookies.set('decomp_live', 'test-only-secret')
     assert evil.get('/api/switch/projects').status_code == 403
+
+
+def test_live_events_retain_earlier_drafts_and_clear_current(tmp_path, nso):
+    e = AnalysisEngine(tmp_path / 'analysis')
+    slug = e.import_file(str(nso))['slug']
+    d = e.directory(slug)
+    old = dict(type='function', name='old', address='0x7100000000', relative_address='0x0', size=4, status='drafted', c='return;', assembly='ret')
+    (d / 'base-functions.jsonl').write_text(json.dumps(old) + '\n')
+    start = dict(type='started', name='next', address='0x7100000004', time=123)
+    (d / 'functions.jsonl').write_text(json.dumps(start) + '\n')
+    e.update(slug, state='drafting')
+    p = e.snapshot(slug)
+    assert p['drafted'] == 1 and p['current_function'] == start
+    assert not p['export_complete']
+    new = old | dict(name='next', address=start['address'], relative_address='0x4', time=124)
+    with (d / 'functions.jsonl').open('a') as f:
+        f.write(json.dumps(new) + '\n' + json.dumps({'type': 'complete'}) + '\n')
+    p = e.snapshot(slug)
+    assert p['drafted'] == 2 and p['current_function'] is None and p['export_complete']
+    assert [r['type'] for r in p['events']] == ['started', 'function']
+    assert [r['time'] for r in p['events']] == [123, 124]
+
+
+def test_next_batch_preserves_results_and_passes_offset(tmp_path, nso, monkeypatch):
+    import decompnet.analysis.engine as engine
+    e = AnalysisEngine(tmp_path / 'analysis')
+    slug = e.import_file(str(nso))['slug']
+    d = e.directory(slug)
+    old = dict(type='function', name='old', address='0x7100000000', relative_address='0x0', size=4, status='drafted', c='return;', assembly='ret')
+    (d / 'functions.jsonl').write_text(json.dumps({'type':'summary','total_functions':10})+'\n'+json.dumps(old)+'\n'+json.dumps({'type':'complete'})+'\n')
+    real = engine.subprocess.Popen
+    commands = []
+    def launch(argv, **kw):
+        commands.append(argv)
+        return real([sys.executable, '-c', 'pass'], **kw)
+    monkeypatch.setattr(engine.subprocess, 'Popen', launch)
+    e._run(slug, 5, threading.Event())
+    assert commands[0][-2:] == ['5','1']
+    p = e.snapshot(slug)
+    assert p['state'] == 'error' and p['drafted'] == 1
+    assert not p['export_complete'] and p['summary']['total_functions'] == 10
+
+
+def test_catalog_contains_undrafted_functions(tmp_path, nso):
+    e = AnalysisEngine(tmp_path / 'analysis')
+    slug = e.import_file(str(nso))['slug']
+    data = [{'name':'future','address':'0x7100001000','size':4}]
+    (e.directory(slug) / 'catalog.json').write_text(json.dumps(data))
+    assert e.catalog(slug) == data
+    assert e.snapshot(slug)['catalog_version'] > 0
+    assert e.snapshot(slug)['exported'] == 0
