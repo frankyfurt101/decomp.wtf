@@ -1,0 +1,233 @@
+"""Persistent, bounded analysis jobs; deliberately separate from matching agents."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import platform
+import re
+import signal
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+from .. import toolchains
+from .inputs import InputError, MAX_FILE, inspect
+
+CAPABILITIES = {"can_analyze": True, "can_draft": True, "can_verify": False, "can_export_game": False}
+ACTIVE = {"queued", "analyzing", "drafting"}
+SLUG = re.compile(r"^[a-f0-9]{64}$")
+
+
+def write_json(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def stop_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+    except ProcessLookupError:
+        pass
+
+
+class AnalysisEngine:
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.RLock()
+        self.running: dict[str, tuple[threading.Thread, threading.Event]] = {}
+        for path in self.root.glob("*/project.json"):
+            try:
+                data = json.loads(path.read_text())
+                if data["state"] in ACTIVE:
+                    data.update(state="interrupted", error="The app stopped during analysis. Resume to continue.")
+                    write_json(path, data)
+            except (ValueError, KeyError, OSError):
+                continue
+
+    def directory(self, slug: str) -> Path:
+        if not SLUG.fullmatch(slug):
+            raise InputError("invalid analysis project id")
+        path = self.root / slug
+        if not (path / "project.json").is_file():
+            raise InputError("analysis project does not exist")
+        return path
+
+    def metadata(self, slug: str) -> dict:
+        return json.loads((self.directory(slug) / "project.json").read_text())
+
+    def update(self, slug: str, **fields) -> None:
+        with self.lock:
+            data = self.metadata(slug)
+            data.update(fields, updated=time.time())
+            write_json(self.directory(slug) / "project.json", data)
+
+    def projects(self) -> list[dict]:
+        return sorted((self.snapshot(p.parent.name, details=False) for p in self.root.glob("*/project.json")
+                       if SLUG.fullmatch(p.parent.name)), key=lambda p: p["updated"], reverse=True)
+
+    def import_file(self, source: str, title: str = "") -> dict:
+        info = inspect(Path(source))
+        slug = info["sha256"]
+        with self.lock:
+            dest = self.root / slug
+            if (dest / "project.json").exists():
+                return self.snapshot(slug)
+            dest.mkdir(exist_ok=True)
+            suffix = ".nso" if info["format"] == "NSO" else ".elf"
+            target = dest / ("module" + suffix)
+            with Path(info.pop("path")).open("rb") as src, target.open("wb") as dst:
+                remaining = MAX_FILE + 1
+                while remaining:
+                    chunk = src.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    remaining -= len(chunk)
+            # Validate the actual snapshot, including detecting source changes during copy.
+            copied = inspect(target)
+            if copied["sha256"] != slug:
+                target.unlink()
+                raise InputError("source changed while copying; retry the import")
+            data = info | {"slug": slug, "title": (title.strip() or info["source_name"])[:160],
+                           "kind": "analysis", "platform": "switch", "capabilities": CAPABILITIES,
+                           "state": "imported", "input": target.name, "updated": time.time(),
+                           "limit": 64, "error": None, "verified_matches": 0}
+            write_json(dest / "project.json", data)
+            return self.snapshot(slug)
+
+    def snapshot(self, slug: str, details: bool = True) -> dict:
+        data = self.metadata(slug)
+        functions, summary, complete = [], {}, False
+        path = self.directory(slug) / "functions.jsonl"
+        if path.exists():
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue  # writer may still be flushing the last record
+                    if row.get("type") == "summary":
+                        summary = row
+                    elif row.get("type") == "complete":
+                        complete = True
+                    elif row.get("type") == "function":
+                        if not details:
+                            row = {k: row[k] for k in ("name", "address", "relative_address", "size", "status")}
+                        functions.append(row)
+        return data | {"summary": summary, "functions": functions, "export_complete": complete,
+                       "exported": len(functions), "drafted": sum(f["status"] == "drafted" for f in functions),
+                       "failed": sum(f["status"] == "failed" for f in functions)}
+
+    def tool_status(self) -> dict:
+        base = toolchains.path("ghidra")
+        loader = any(base.glob("Ghidra/Extensions/*Switch*/extension.properties"))
+        arch = {"arm64": "arm_64", "aarch64": "arm_64", "x86_64": "x86_64"}.get(platform.machine(), platform.machine())
+        host = "mac" if platform.system() == "Darwin" else "linux"
+        native = base / "Ghidra" / "Features" / "Decompiler" / "os" / f"{host}_{arch}" / "decompile"
+        return {"ghidra_installed": toolchains.installed("ghidra") is not None,
+                "java_version": toolchains.java_version(), "switch_loader_installed": loader,
+                "native_decompiler_available": os.access(native, os.X_OK),
+                "supported_host": os.name == "posix"}
+
+    def start(self, slug: str, limit: int = 64) -> dict:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise InputError("choose a function sample between 1 and 500")
+        with self.lock:
+            data = self.metadata(slug)
+            if any(t.is_alive() for t, _ in self.running.values()):
+                raise InputError("one analysis can run at a time; wait or cancel the active job")
+            status = self.tool_status()
+            if not status["supported_host"]:
+                raise InputError("Switch analysis currently supports macOS and Linux")
+            if not status["ghidra_installed"] or status["java_version"] < 21:
+                raise InputError("install Ghidra and Java 21+ in Compilers & tools before analyzing")
+            if not status["native_decompiler_available"]:
+                raise InputError("Ghidra's native decompiler is missing for this host; see docs/switch-analysis.md")
+            if data["format"] == "NSO" and not status["switch_loader_installed"]:
+                raise InputError("install a Ghidra Switch Loader built for this Ghidra version first")
+            event = threading.Event()
+            thread = threading.Thread(target=self._run, args=(slug, limit, event), daemon=True)
+            self.running[slug] = (thread, event)
+            self.update(slug, state="queued", limit=limit, error=None)
+            thread.start()
+        return self.snapshot(slug, details=False)
+
+    def cancel(self, slug: str) -> dict:
+        self.directory(slug)
+        with self.lock:
+            if slug in self.running:
+                self.running[slug][1].set()
+        return self.snapshot(slug, details=False)
+
+    def _run(self, slug: str, limit: int, cancel: threading.Event) -> None:
+        proc = None
+        try:
+            directory = self.directory(slug)
+            data = self.metadata(slug)
+            source = directory / data["input"]
+            with source.open("rb") as f:
+                if hashlib.file_digest(f, "sha256").hexdigest() != slug:
+                    raise InputError("local executable changed; import it as a new project")
+            project_dir = directory / "ghidra"
+            project_dir.mkdir(exist_ok=True)
+            output = directory / "functions.jsonl"
+            # Preserve the previous sample without presenting it as the new job's result.
+            if output.exists():
+                output.replace(directory / "previous-functions.jsonl")
+            script = Path(__file__).with_name("SwitchExport.java")
+            # A changed exporter/loader/tool release must not silently reuse old analysis.
+            fingerprint = hashlib.sha256(script.read_bytes())
+            fingerprint.update(toolchains.get("ghidra").source.encode())
+            for jar in sorted(toolchains.path("ghidra").glob("Ghidra/Extensions/*Switch*/lib/*.jar")):
+                with jar.open("rb") as f:
+                    fingerprint.update(hashlib.file_digest(f, "sha256").digest())
+            signature = fingerprint.hexdigest()
+            resumed = ((project_dir / "switch.gpr").exists() and data.get("analysis_saved", False)
+                       and data.get("analysis_signature") == signature)
+            argv = [str(toolchains.path("ghidra") / "support" / "analyzeHeadless"), str(project_dir), "switch"]
+            argv += ["-process", source.name, "-noanalysis"] if resumed else ["-import", str(source), "-overwrite"]
+            argv += ["-analysisTimeoutPerFile", "300", "-max-cpu", "2", "-scriptPath", str(script.parent),
+                     "-postScript", script.name, str(output), str(limit)]
+            self.update(slug, state="analyzing", analysis_scope="bounded discovery; up to 300 seconds")
+            started = time.monotonic()
+            started_wall = time.time()
+            # JAVA_TOOL_OPTIONS applies to the JVM, not the user's shell or system configuration.
+            env = os.environ.copy()
+            env["JAVA_TOOL_OPTIONS"] = "-Xmx2g -XX:ActiveProcessorCount=2"
+            env["GHIDRA_HEADLESS_MAXMEM"] = "2G"
+            with (directory / "analysis.log").open("w", encoding="utf-8") as log:
+                proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env,
+                                        start_new_session=True, cwd=directory)
+                while proc.poll() is None:
+                    if cancel.wait(0.25):
+                        stop_process(proc)
+                        self.update(slug, state="cancelled", error="Analysis cancelled; partial results retained.")
+                        return
+                    if time.monotonic() - started > 900:
+                        stop_process(proc)
+                        self.update(slug, state="error", error="Analysis exceeded the 15-minute job limit; partial results retained.")
+                        return
+                    if output.exists() and self.metadata(slug)["state"] == "analyzing":
+                        self.update(slug, state="drafting")
+                result = self.snapshot(slug)
+                if proc.returncode or not result["export_complete"] or not output.exists() or output.stat().st_mtime < started_wall:
+                    raise InputError("Ghidra did not finish the export; inspect the project's analysis.log")
+            self.update(slug, state="completed", analysis_saved=True, error=None,
+                        analysis_signature=signature,
+                        discovery_timed_out=(data.get("discovery_timed_out", False) if resumed else
+                                             "REPORT: Analysis timed out" in (directory / "analysis.log").read_text(errors="replace")),
+                        ghidra_source=toolchains.get("ghidra").source)
+        except Exception as e:
+            if proc and proc.poll() is None:
+                stop_process(proc)
+            self.update(slug, state="error", error=str(e))

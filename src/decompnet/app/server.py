@@ -191,6 +191,9 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         except ValueError:
             return {}
 
+    from ..analysis.routes import register as register_analysis
+    register_analysis(mcp, home.parent, guard, _static)
+
     async def call(fn, *args):
         return await anyio.to_thread.run_sync(fn, *args)
 
@@ -207,7 +210,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         if key:
             if not secrets.compare_digest(key, secret):
                 return HTMLResponse("This link is from an earlier session. Open decomp.wtf again.", status_code=401)
-            resp = RedirectResponse("/", status_code=303)
+            resp = RedirectResponse("/switch" if request.query_params.get("view") == "switch" else "/", status_code=303)
             resp.set_cookie(COOKIE, secret, httponly=True, samesite="strict", max_age=30 * 86400)
             return resp
         if not secrets.compare_digest(request.cookies.get(COOKIE, ""), secret):

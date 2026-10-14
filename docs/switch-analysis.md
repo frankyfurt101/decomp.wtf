@@ -1,6 +1,67 @@
 # Switch analysis and New Horizons roadmap
 
-Status: design only; no Switch importer or New Horizons decompilation has been implemented on this branch.
+Status: experimental local analysis implemented. NSO and AArch64 ELF import, persistent Ghidra projects, bounded C-like drafts, assembly, direct calls, and a visual function map are available at `/switch`. Compiler matching, NRO import, agent-assisted reconstruction, and game export remain future work.
+
+
+## Run the analysis preview
+
+Run `decomp` from this checkout and choose **Switch analysis** in the sidebar. Supply an extracted NSO `main`,
+an ExeFS folder containing `main`, or a linked AArch64 ELF. Confirm ownership, then analyze a sample of 1–500
+functions. The default is 64. Inputs are copied into `DECOMP_HOME/switch-analysis/<sha256>/`; the original
+file is left untouched. NSP files receive an extraction-required message. This feature does not process keys.
+
+The worker uses at most two analysis CPUs, a 2 GiB Java heap, 300 seconds of automatic discovery, 20 seconds
+per function, and a 15-minute overall job limit. These are task limits, not a claim of total process-memory
+isolation. Cancel stops the worker process group. App interruption is reported on the next launch.
+A finished project's Ghidra database can be reused; changing the exporter, loader JARs, or registered Ghidra
+release invalidates reuse. `functions.jsonl` streams partial results; failed attempts retain their logs.
+The previous sample is preserved as `previous-functions.jsonl` on rerun.
+
+**Counts are analysis results, not game-completion percentages.** Discovered functions depend on bounded
+Ghidra analysis; sampled functions are the first nonexternal functions in address order. C-like drafts may
+be wrong or incomplete. Verified matches remain zero. These projects are separate from the matching engine
+and cannot be claimed by matching agents or exported as rebuildable games.
+
+## Tested toolchain and setup
+
+Tested on Apple Silicon macOS with Ghidra 12.1.4, Temurin JDK 21, and Ghidra-Switch-Loader source commit
+`5d80d195bf284f8ad5f2f9b66c3bdd5c67dd66a6`. Ghidra is installed through the existing toolchain registry.
+Use `JAVA_HOME` for the JDK and `DECOMPNET_TOOLCHAINS` for a custom local toolchain directory.
+
+The loader release tagged `1.6.1-c600d05-Ghidra_12.1.2` supplies its third-party dependency JARs. The loader
+itself must be rebuilt against Ghidra 12.1.4; changing its version label alone is insufficient. The helper
+uses a previously downloaded source tree and unpacked release without contacting the network:
+
+```sh
+python tools/build-switch-loader.py --ghidra /absolute/path/to/ghidra \
+  --source /absolute/path/to/Ghidra-Switch-Loader \
+  --release-dir /absolute/path/to/unpacked/SwitchLoader \
+  --jdk /absolute/path/to/jdk/Contents/Home --output /absolute/path/to/new/SwitchLoader
+```
+
+Copy the resulting `SwitchLoader` directory to `Ghidra/Extensions/` in that Ghidra installation, then restart
+the app. The official loader's Gradle build is also supported upstream; consult its README for compatibility.
+
+The Ghidra release used here did not include a macOS ARM native decompiler. Build its shipped source with
+Xcode command-line tools (use a fresh build tree to avoid mixing architectures):
+
+```sh
+cd /absolute/path/to/ghidra/Ghidra/Features/Decompiler/src/decompile/cpp
+make -j2 ghidra_opt ARCH_TYPE='-arch arm64' ADDITIONAL_FLAGS='-mmacosx-version-min=11.0'
+mkdir -p ../../../os/mac_arm_64
+cp ghidra_opt ../../../os/mac_arm_64/decompile
+```
+
+The app checks for the native executable before starting analysis. Java/Ghidra may create their usual user
+preferences and cache directories. Imports are analyzed, never executed as target programs.
+
+## Validation
+
+`pytest tests/test_switch_analysis.py tests/test_app_server.py` covers input bounds, malformed packages,
+64-bit addresses, authentication/Host/write-header checks, interrupted recovery, cancellation, stale-export
+rejection, and separation from the matching database. Platform-dependent existing tests may skip when their
+legacy compiler is absent. Build and analyze both original fixtures in `projects/demo-switch/` for the
+Ghidra integration check; the unit suite does not download tools or require commercial game data.
 
 ## Target outcome
 
@@ -32,8 +93,7 @@ At upstream commit `a8708d82246f869fddd1f9e98d4007397f31dea6`:
 
 ### Inputs and identity
 
-Start with an extracted ExeFS directory or NSO `main` module supplied locally by the user. Add supported NRO
-and AArch64 ELF fixtures for development. Treat NSP as a package requiring a separate preparation step;
+Start with an extracted ExeFS directory or NSO `main` module supplied locally by the user. AArch64 ELF fixtures support development; NRO remains future work. Treat NSP as a package requiring a separate preparation step;
 recognizing its header is not executable import. A future local package adapter should be independently
 tested before integration.
 
@@ -43,7 +103,7 @@ versions and updates separate. Never infer game version solely from a filename.
 
 ### Architecture
 
-1. Add a Switch input module under `src/decompnet/rom/` with bounded header reads, segment validation,
+1. Add a Switch input module under `src/decompnet/analysis/` with bounded header reads, segment validation,
    file-size limits and format-specific errors. Keep parsing separate from project persistence.
 2. Add an analysis project engine alongside `RomNetwork` and `ForkEngine`. Use explicit capability flags
    such as `can_analyze`, `can_draft` and `can_verify`; gate API/MCP actions as well as UI controls.
@@ -130,3 +190,19 @@ are complete.
 - [Existing New Horizons research](https://github.com/Treeki/CylindricalEarth)
 - [Ninji's research background](https://wuffs.org/projects/acnh)
 - [An existing Switch matching project](https://github.com/MonsterDruide1/OdysseyDecomp)
+
+## Local acceptance record — October 14, 2026
+
+- Original AArch64 ELF and NSO fixtures each yielded three discovered functions and three drafts.
+  The NSO retained the expected `_start`, `clamp_value`, and `checksum` symbols, two direct call links from
+  `_start`, and image base `0x7100000000`. Reanalysis reused the saved Ghidra project successfully.
+- A privately held New Horizons 1.0.0 main module, SHA-256
+  `f8d248109ff72999b4600ae3749f8c7397fb960f7ad3ab8dee3018ae9e14e900`, yielded **49,241 discovered functions**
+  before the 300-second discovery limit, followed by **64 sampled functions / 64 drafts / 0 sample failures**.
+  Verified compiler matches: **0**. Discovery is partial, and some analyzers logged warnings.
+- Browser checks passed for function selection, assembly/draft tabs, search hits/misses, a 390-pixel mobile
+  viewport without horizontal overflow, and absence of JavaScript errors. The local app retains the results.
+- No game binaries, generated game drafts, assets, keys, or Ghidra databases are included in this repository.
+
+These results qualify a local analysis preview. They do not establish a complete decompilation, native port,
+rebuildable game, or TestFlight application. Milestones 2–4 above remain outstanding.
