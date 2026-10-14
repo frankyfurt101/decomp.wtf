@@ -136,9 +136,12 @@ versions and updates separate. Never infer game version solely from a filename.
 ## Milestone 2: agent-assisted reconstruction (initial adapter implemented)
 
 The original project view now has an **AI source reconstruction** panel. It detects installed Antigravity
-CLI (`agy`), lists the account's models, and uses its existing sign-in. Each explicit run processes 1–20
-eligible decompiled functions, with one function per CLI invocation and a five-minute per-function limit.
-The default is one function; it does not start a paid API-key loop or automatically run the entire game.
+CLI (`agy`), lists the account's models, and uses its existing sign-in. There are five independently controlled worker slots.
+Each explicit run processes 1–100 eligible decompiled functions per worker; the UI defaults to 100. Each
+function gets its own CLI invocation and a five-minute limit. Model dropdowns list all models returned by
+`agy models`, including available Gemini, Claude and GPT-OSS variants. **Start all idle workers** launches
+up to five concurrent runs; individual Start/Stop buttons and **Stop all AI** are also available. The Agents
+page can launch a selected slot and open the project. No run starts automatically on page load.
 CLI subscription/credit limits still apply. Reported token usage is shown without inventing a dollar cost.
 
 Assembly and Ghidra source are supplied on stdin. Antigravity returns schema-validated C/C++ candidates,
@@ -147,7 +150,11 @@ that its output compiles. The normal CLI permissions and terminal sandbox remain
 program strings are explicitly treated as untrusted data. Candidate writes are performed by the app,
 separate from the original Ghidra records, and are never counted as verified matches.
 
-The map pulses purple on the active function. The activity feed reflects actual CLI events; it does not
+Workers reserve disjoint function addresses under a lock. Candidate index writes are serialized, and
+each worker has a separate CLI working directory and durable job file. Failures release unfinished claims
+without discarding other workers' results. The app allows at most five active AI workers across projects.
+
+The map pulses purple on every active function. The activity feed reflects actual CLI events; it does not
 expose private model reasoning. Saved candidates remain purple, and the original drawer switches between
 Ghidra output and the AI candidate with its evidence. Stop AI terminates the process group and preserves
 completed candidates. Restart marks unfinished runs interrupted; it does not silently spend more quota.
@@ -235,7 +242,7 @@ are complete.
 - Browser checks passed for function filtering, 64-bit address search, assembly/C selection, read-only
   drafts, search hits/misses, activity navigation, dark theme, project/home navigation, and a 390-pixel
   viewport without horizontal overflow. No JavaScript errors were observed.
-- Targeted Python tests: **47 passed, 3 skipped**; the skips are existing environment-dependent checks.
+- Targeted Python tests: **54 passed, 3 skipped**; the skips are existing environment-dependent checks.
 - Antigravity CLI completed a real one-function New Horizons reconstruction at `0x71000001c0`, preserving
   the Ghidra draft and saving a separate candidate with instruction evidence and type/ABI uncertainties.
   The app observed live AI work, saved one candidate, and verified drawer switching. The CLI reported
@@ -243,6 +250,12 @@ are complete.
   separately reported, so the record labels it CLI default. No compiler match is claimed.
 - A real original NSO fixture completed three consecutive one-function checkpoints automatically and stopped
   at the end of its inventory. This verifies continuous progression beyond an individual checkpoint.
+- Concurrency tests processed 500 fixture functions across five workers, with no duplicate addresses or lost
+  candidates. Five real fixture subprocesses used separate working directories and selected model arguments.
+  Cancellation, failure recovery, legacy job migration, slot validation, and API routing passed.
+- Fourteen browser checks covered five model dropdowns, the 100-function bound, start-all/stop-one/stop-all,
+  cancellation during bulk launch, five active map cells, worker errors, and mobile layout. These browser
+  start/stop requests were intercepted; no extra game reconstruction quota was used for UI testing.
 - No game binaries, generated game drafts, assets, keys, or Ghidra databases are included in this repository.
 
 These results qualify a local analysis preview. They do not establish a complete decompilation, native port,

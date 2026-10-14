@@ -166,7 +166,7 @@ def test_routes_share_auth_and_do_not_enter_matching_database(tmp_path, nso):
     assert client.get('/api/state').json()['projects'] == []
     for route in ('/api/switch/agent/start', '/api/switch/agent/stop'):
         assert client.post(route, json=[], headers=h).status_code == 400
-    assert client.post('/api/switch/agent/start', json={'id':slug,'limit':21}, headers=h).status_code == 400
+    assert client.post('/api/switch/agent/start', json={'id':slug,'limit':101}, headers=h).status_code == 400
     for invalid in (True, 0, 501, '64'):
         assert client.post('/api/switch/start', json={'id': slug, 'limit': invalid}, headers=h).status_code == 400
     assert client.post('/api/switch/cancel', json=[], headers=h).status_code == 400
@@ -237,3 +237,21 @@ def test_lightweight_record_cache_refreshes_after_append(tmp_path, nso):
     assert e.snapshot(slug)['functions'][0]['c']=='return;'
     with path.open('a') as f:f.write(json.dumps(row|dict(address='0x7100000004'))+'\n')
     assert e.snapshot(slug,False)['drafted']==2
+
+
+def test_worker_routes_forward_slot_and_100_function_limit(tmp_path, monkeypatch):
+    from decompnet.analysis.reconstruct import ReconstructionEngine
+    home=tmp_path/'app';state=home/'.decomp';state.mkdir(parents=True)
+    net=RomNetwork(state/'decomp.db',home)
+    mcp,_,security=build(net,state,6499,'test-only-secret')
+    client=TestClient(mcp.streamable_http_app(transport_security=security,host='127.0.0.1'),base_url='http://127.0.0.1:6499')
+    client.cookies.set('decomp_live','test-only-secret')
+    starts=[];stops=[]
+    monkeypatch.setattr(ReconstructionEngine,'start',lambda self,*args: starts.append(args) or {'ok':True})
+    monkeypatch.setattr(ReconstructionEngine,'cancel',lambda self,*args: stops.append(args) or {'ok':True})
+    h={'X-Decomp':'1'};slug='a'*64
+    assert client.post('/api/switch/agent/start',json={'id':slug,'worker':5,'limit':100,'model':'test-model'},headers=h).status_code==200
+    assert starts==[(slug,100,'test-model','',5)]
+    assert client.post('/api/switch/agent/stop',json={'id':slug,'worker':3},headers=h).status_code==200
+    assert client.post('/api/switch/agent/stop',json={'id':slug},headers=h).status_code==200
+    assert stops==[(slug,3),(slug,None)]

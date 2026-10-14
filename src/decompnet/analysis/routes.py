@@ -113,7 +113,7 @@ def register(mcp, home, guard, static):
             if not isinstance(data, dict) or not isinstance(data.get("id"), str):
                 raise InputError("provide an analysis project id")
             return JSONResponse(await anyio.to_thread.run_sync(reconstruction.start, data["id"],
-                                data.get("limit", 1), data.get("model", ""), data.get("address", "")))
+                                data.get("limit", 1), data.get("model", ""), data.get("address", ""), data.get("worker", 1)))
         except (InputError, OSError, ValueError) as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -125,7 +125,7 @@ def register(mcp, home, guard, static):
             data = await request.json()
             if not isinstance(data, dict) or not isinstance(data.get("id"), str):
                 raise InputError("provide an analysis project id")
-            return JSONResponse(await anyio.to_thread.run_sync(reconstruction.cancel, data["id"]))
+            return JSONResponse(await anyio.to_thread.run_sync(reconstruction.cancel, data["id"], data.get("worker")))
         except (InputError, OSError, ValueError) as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
