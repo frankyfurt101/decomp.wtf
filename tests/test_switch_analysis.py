@@ -143,7 +143,7 @@ def test_routes_share_auth_and_do_not_enter_matching_database(tmp_path, nso):
     mcp, _, security = build(net, state, 6499, 'test-only-secret')
     app = mcp.streamable_http_app(transport_security=security, host='127.0.0.1')
     client = TestClient(app, base_url='http://127.0.0.1:6499')
-    for route in ('/switch', '/api/switch/projects', '/api/switch/project?id=x', '/api/switch/map?id=x', '/api/switch/function?id=x'):
+    for route in ('/switch', '/api/switch/projects', '/api/switch/project?id=x', '/api/switch/map?id=x', '/api/switch/agent/config', '/api/switch/function?id=x'):
         assert client.get(route).status_code == 401
     client.cookies.set('decomp_live', 'test-only-secret')
     redirect = client.get('/?k=test-only-secret&view=switch', follow_redirects=False)
@@ -154,6 +154,8 @@ def test_routes_share_auth_and_do_not_enter_matching_database(tmp_path, nso):
     assert client.get('/switch').status_code == 200
     payload = {'path': str(nso), 'confirmed': True}
     assert client.post('/api/switch/import', json=payload).status_code == 403
+    for route in ('/api/switch/agent/start', '/api/switch/agent/stop'):
+        assert client.post(route, json={}).status_code == 403
     h = {'X-Decomp': '1'}
     assert client.post('/api/switch/import', json={'path': str(nso)}, headers=h).status_code == 400
     r = client.post('/api/switch/import', json=payload, headers=h)
@@ -162,6 +164,9 @@ def test_routes_share_auth_and_do_not_enter_matching_database(tmp_path, nso):
     assert client.get('/api/switch/project', params={'id': slug}).json()['state'] == 'imported'
     assert client.get('/api/switch/map', params={'id': slug}).json() == []
     assert client.get('/api/state').json()['projects'] == []
+    for route in ('/api/switch/agent/start', '/api/switch/agent/stop'):
+        assert client.post(route, json=[], headers=h).status_code == 400
+    assert client.post('/api/switch/agent/start', json={'id':slug,'limit':21}, headers=h).status_code == 400
     for invalid in (True, 0, 501, '64'):
         assert client.post('/api/switch/start', json={'id': slug, 'limit': invalid}, headers=h).status_code == 400
     assert client.post('/api/switch/cancel', json=[], headers=h).status_code == 400
@@ -219,3 +224,16 @@ def test_catalog_contains_undrafted_functions(tmp_path, nso):
     assert e.catalog(slug) == data
     assert e.snapshot(slug)['catalog_version'] > 0
     assert e.snapshot(slug)['exported'] == 0
+
+
+def test_lightweight_record_cache_refreshes_after_append(tmp_path, nso):
+    e = AnalysisEngine(tmp_path / 'analysis')
+    slug = e.import_file(str(nso))['slug']
+    path=e.directory(slug)/'functions.jsonl'
+    row=dict(type='function',name='f',address='0x7100000000',relative_address='0x0',size=4,status='drafted',c='return;',assembly='ret')
+    path.write_text(json.dumps(row)+'\n')
+    first=e.snapshot(slug,False)
+    assert first['drafted']==1 and 'c' not in first['functions'][0]
+    assert e.snapshot(slug)['functions'][0]['c']=='return;'
+    with path.open('a') as f:f.write(json.dumps(row|dict(address='0x7100000004'))+'\n')
+    assert e.snapshot(slug,False)['drafted']==2

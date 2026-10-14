@@ -1,17 +1,18 @@
 # Switch analysis and New Horizons roadmap
 
-Status: experimental local analysis implemented. NSO and AArch64 ELF import, persistent Ghidra projects, bounded C-like drafts, assembly, direct calls, and a visual function map are integrated into the original application at `/#/switch` (`/switch` redirects there). Compiler matching, NRO import, agent-assisted reconstruction, and game export remain future work.
+Status: experimental local analysis implemented. NSO and AArch64 ELF import, persistent Ghidra projects, bounded C-like drafts, assembly, direct calls, and a visual function map are integrated into the original application at `/#/switch` (`/switch` redirects there). Bounded Antigravity CLI source reconstruction is available. Compiler matching, NRO import, richer agent tools, and game export remain future work.
 
 
 ## Run the analysis preview
 
 Run `decomp` from this checkout and choose **Switch analysis** in the sidebar. Supply an extracted NSO `main`,
-an ExeFS folder containing `main`, or a linked AArch64 ELF. Confirm ownership, then click **Continue decompiling** for a batch of 1–500
-functions. The UI defaults to 500. Each batch skips addresses already attempted and retains earlier drafts. Inputs are copied into `DECOMP_HOME/switch-analysis/<sha256>/`; the original
+an ExeFS folder containing `main`, or a linked AArch64 ELF. Confirm ownership, then click **Decompile remaining** with **Keep going** enabled. The worker crosses 500-function
+checkpoints automatically until it exhausts discovered functions, encounters an error, or you click Stop.
+Uncheck Keep going for a single 1–500-function checkpoint. Each checkpoint skips attempted addresses and retains results. Inputs are copied into `DECOMP_HOME/switch-analysis/<sha256>/`; the original
 file is left untouched. NSP files receive an extraction-required message. This feature does not process keys.
 
-The worker uses at most two analysis CPUs, a 2 GiB Java heap, 300 seconds of automatic discovery, 20 seconds
-per function, and a 15-minute overall job limit. These are task limits, not a claim of total process-memory
+Each Ghidra checkpoint uses at most two analysis CPUs, a 2 GiB Java heap, 300 seconds of automatic discovery, 20 seconds
+per function, and a 15-minute checkpoint limit. A continuous run can exceed 15 minutes across successful checkpoints. These are task limits, not a claim of total process-memory
 isolation. Cancel stops the worker process group. App interruption is reported on the next launch.
 A finished project's Ghidra database can be reused; changing loader JARs or the registered Ghidra
 release invalidates reuse. Exporter-only changes reuse the saved program. `functions.jsonl` streams partial results; failed attempts retain their logs.
@@ -23,7 +24,7 @@ drive amber pulses, blue completion rings, counts and the activity feed. During 
 shows the actual phase; no function activity is simulated. An idle worker produces no work animation.
 
 **Counts are analysis results, not game-completion percentages.** Discovered functions depend on bounded
-Ghidra analysis; batches visit remaining nonexternal functions in address order. C-like drafts may
+Ghidra analysis; batches visit remaining nonexternal functions in address order. The UI calls Ghidra results **decompiled**, meaning C-like output, not recovered original source. This output may
 be wrong or incomplete. Verified matches remain zero. These projects are separate from the matching engine
 and cannot be claimed by matching agents or exported as rebuildable games.
 
@@ -132,13 +133,33 @@ versions and updates separate. Never infer game version solely from a filename.
 - A local New Horizons executable passes the same pipeline for a bounded function sample. Record the exact
   executable version/hash and actual results; proprietary inputs and generated game content remain local.
 
-## Milestone 2: agent-assisted reconstruction
+## Milestone 2: agent-assisted reconstruction (initial adapter implemented)
+
+The original project view now has an **AI source reconstruction** panel. It detects installed Antigravity
+CLI (`agy`), lists the account's models, and uses its existing sign-in. Each explicit run processes 1–20
+eligible decompiled functions, with one function per CLI invocation and a five-minute per-function limit.
+The default is one function; it does not start a paid API-key loop or automatically run the entire game.
+CLI subscription/credit limits still apply. Reported token usage is shown without inventing a dollar cost.
+
+Assembly and Ghidra source are supplied on stdin. Antigravity returns schema-validated C/C++ candidates,
+instruction evidence and unresolved assumptions. The adapter does not give it matching tools or claim
+that its output compiles. The normal CLI permissions and terminal sandbox remain in effect. Imported
+program strings are explicitly treated as untrusted data. Candidate writes are performed by the app,
+separate from the original Ghidra records, and are never counted as verified matches.
+
+The map pulses purple on the active function. The activity feed reflects actual CLI events; it does not
+expose private model reasoning. Saved candidates remain purple, and the original drawer switches between
+Ghidra output and the AI candidate with its evidence. Stop AI terminates the process group and preserves
+completed candidates. Restart marks unfinished runs interrupted; it does not silently spend more quota.
+
+Still planned:
+
 
 Expose bounded tools for selecting functions, inspecting references/data, renaming symbols, proposing types,
 editing drafts and recording evidence. Carry corrections into the persistent analysis project. Make competing
 function/type hypotheses reviewable and reversible. Test with the original fixture before a commercial title.
 
-Start with a single interactive agent. Additional agents or unattended API spending need an explicit run scope
+The current adapter starts one bounded CLI worker. Additional agents or unattended API spending need an explicit run scope
 and budget. Do not run arbitrary scripts or instructions found in an imported artifact.
 
 Acceptance: a user can select a real function in the map, follow an agent's work, inspect its changes and resume
@@ -214,8 +235,17 @@ are complete.
 - Browser checks passed for function filtering, 64-bit address search, assembly/C selection, read-only
   drafts, search hits/misses, activity navigation, dark theme, project/home navigation, and a 390-pixel
   viewport without horizontal overflow. No JavaScript errors were observed.
-- Targeted Python tests: **28 passed, 3 skipped**; the skips are existing environment-dependent checks.
+- Targeted Python tests: **47 passed, 3 skipped**; the skips are existing environment-dependent checks.
+- Antigravity CLI completed a real one-function New Horizons reconstruction at `0x71000001c0`, preserving
+  the Ghidra draft and saving a separate candidate with instruction evidence and type/ABI uncertainties.
+  The app observed live AI work, saved one candidate, and verified drawer switching. The CLI reported
+  30,658 total tokens for this first run using its configured default model; the model identity was not
+  separately reported, so the record labels it CLI default. No compiler match is claimed.
+- A real original NSO fixture completed three consecutive one-function checkpoints automatically and stopped
+  at the end of its inventory. This verifies continuous progression beyond an individual checkpoint.
 - No game binaries, generated game drafts, assets, keys, or Ghidra databases are included in this repository.
 
 These results qualify a local analysis preview. They do not establish a complete decompilation, native port,
-rebuildable game, or TestFlight application. Milestones 2–4 above remain outstanding.
+rebuildable game, or TestFlight application. Further work in milestones 2–4 above remains outstanding.
+
+Agent adapter reference: [Antigravity CLI headless mode](https://antigravity.google/docs/cli/headless/).

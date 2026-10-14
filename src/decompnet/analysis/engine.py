@@ -15,7 +15,7 @@ from pathlib import Path
 from .. import toolchains
 from .inputs import InputError, MAX_FILE, inspect
 
-CAPABILITIES = {"can_analyze": True, "can_draft": True, "can_verify": False, "can_export_game": False}
+CAPABILITIES = {"can_analyze": True, "can_draft": True, "can_reconstruct": True, "can_verify": False, "can_export_game": False}
 ACTIVE = {"queued", "analyzing", "drafting"}
 SLUG = re.compile(r"^[a-f0-9]{64}$")
 
@@ -45,6 +45,7 @@ class AnalysisEngine:
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.catalog_cache = {}
+        self.record_cache = {}
         self.running: dict[str, tuple[threading.Thread, threading.Event]] = {}
         for path in self.root.glob("*/project.json"):
             try:
@@ -106,6 +107,30 @@ class AnalysisEngine:
             write_json(dest / "project.json", data)
             return self.snapshot(slug)
 
+    def _records(self, path, details):
+        try:
+            stat = path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            cached = self.record_cache.get(path)
+            if not details and cached and cached[0] == stamp:
+                return cached[1]
+            rows = []
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not details and row.get("type") == "function":
+                        row = {k: row.get(k) for k in ("type", "name", "address", "relative_address", "size", "status", "time")}
+                    rows.append(row)
+            if not details:
+                self.record_cache[path] = (stamp, rows)
+            return rows
+        except FileNotFoundError:
+            # A completed batch may be rotated while the UI polls it.
+            return []
+
     def snapshot(self, slug: str, details: bool = True) -> dict:
         data = self.metadata(slug)
         functions, summary, complete, events, current = {}, {}, False, [], None
@@ -115,28 +140,23 @@ class AnalysisEngine:
         for path in paths:
             if not path.exists():
                 continue
-            with path.open(encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        continue
-                    kind = row.get("type")
-                    if kind == "summary":
-                        summary = row
-                    elif kind == "complete":
-                        complete = True
-                    elif kind == "started":
-                        current = row
-                        events.append(row)
-                    elif kind == "function":
-                        if path != base:
-                            events.append({k: row.get(k) for k in ("type", "name", "address", "status", "time")})
-                        if current and current["address"] == row["address"]:
-                            current = None
-                        if not details:
-                            row = {k: row[k] for k in ("name", "address", "relative_address", "size", "status")}
-                        functions[row["address"]] = row
+            for row in self._records(path, details):
+                kind = row.get("type")
+                if kind == "summary":
+                    summary = row
+                elif kind == "complete":
+                    complete = True
+                elif kind == "started":
+                    current = row
+                    events.append(row)
+                elif kind == "function":
+                    if path != base:
+                        events.append({k: row.get(k) for k in ("type", "name", "address", "status", "time")})
+                    if current and current["address"] == row["address"]:
+                        current = None
+                    if not details:
+                        row = {k: row[k] for k in ("name", "address", "relative_address", "size", "status")}
+                    functions[row["address"]] = row
         if not summary:
             previous = directory / "previous-functions.jsonl"
             if previous.exists():
@@ -149,7 +169,7 @@ class AnalysisEngine:
                         pass
         catalog = directory / "catalog.json"
         rows = list(functions.values())
-        return data | {"catalog_version": catalog.stat().st_mtime_ns if catalog.exists() else 0,
+        return data | {"capabilities": CAPABILITIES, "catalog_version": catalog.stat().st_mtime_ns if catalog.exists() else 0,
                        "summary": summary, "functions": rows, "export_complete": complete,
                        "current_function": current if data["state"] in ACTIVE else None,
                        "events": events, "exported": len(rows),
@@ -178,9 +198,11 @@ class AnalysisEngine:
                 "native_decompiler_available": os.access(native, os.X_OK),
                 "supported_host": os.name == "posix"}
 
-    def start(self, slug: str, limit: int = 64) -> dict:
+    def start(self, slug: str, limit: int = 64, continuous: bool = False) -> dict:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
-            raise InputError("choose a function sample between 1 and 500")
+            raise InputError("choose a checkpoint size between 1 and 500")
+        if not isinstance(continuous, bool):
+            raise InputError("continuous must be true or false")
         with self.lock:
             data = self.metadata(slug)
             if any(t.is_alive() for t, _ in self.running.values()):
@@ -195,9 +217,11 @@ class AnalysisEngine:
             if data["format"] == "NSO" and not status["switch_loader_installed"]:
                 raise InputError("install a Ghidra Switch Loader built for this Ghidra version first")
             event = threading.Event()
-            thread = threading.Thread(target=self._run, args=(slug, limit, event), daemon=True)
+            thread = threading.Thread(target=self._run_batches, args=(slug, limit, event, continuous), daemon=True)
             self.running[slug] = (thread, event)
-            self.update(slug, state="queued", limit=limit, error=None, job_started=time.time())
+            self.update(slug, state="queued", limit=limit, error=None, job_started=time.time(), continuous=continuous,
+                        run_start_offset=self.snapshot(slug, False)["exported"],
+                        run_mode="continuous" if continuous else "checkpoint")
             thread.start()
         return self.snapshot(slug, details=False)
 
@@ -207,6 +231,33 @@ class AnalysisEngine:
             if slug in self.running:
                 self.running[slug][1].set()
         return self.snapshot(slug, details=False)
+
+    def stop(self):
+        for thread, event in list(self.running.values()):
+            event.set()
+        for thread, _ in list(self.running.values()):
+            thread.join(6)
+
+    def _run_batches(self, slug, limit, cancel, continuous):
+        try:
+            while not cancel.is_set():
+                before = self.snapshot(slug, False)["exported"]
+                self._run(slug, limit, cancel)
+                after = self.snapshot(slug, False)
+                if not continuous or after["state"] != "completed" or cancel.is_set():
+                    break
+                if after["exported"] <= before:
+                    break
+                done = {f["address"] for f in after["functions"]}
+                if all(f["address"] in done for f in self.catalog(slug)):
+                    break
+                self.update(slug, state="queued", phase="Continuing with the next checkpoint")
+            if cancel.is_set():
+                self.update(slug, state="cancelled", phase="Stopped", error="Stopped; completed decompilations retained.")
+        except Exception as e:
+            self.update(slug, state="error", error=str(e))
+        finally:
+            self.update(slug, continuous=False)
 
     def _run(self, slug: str, limit: int, cancel: threading.Event) -> None:
         proc = None

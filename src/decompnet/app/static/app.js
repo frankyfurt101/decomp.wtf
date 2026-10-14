@@ -1112,7 +1112,7 @@ function cssColor(name) {
   return rgb;
 }
 function readColors() {
-  colors = { draft: cssColor("--move"), fail: cssColor("--miss"), open: cssColor("--open"), tried: cssColor("--tried"), work: cssColor("--work"), match: cssColor("--match"), hi: cssColor("--match-hi"), ink: cssColor("--ink") };
+  colors = { ai: cssColor("--analysis-ai"), draft: cssColor("--move"), fail: cssColor("--miss"), open: cssColor("--open"), tried: cssColor("--tried"), work: cssColor("--work"), match: cssColor("--match"), hi: cssColor("--match-hi"), ink: cssColor("--ink") };
 }
 const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
 const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -1163,7 +1163,9 @@ function drawMap() {
   S.map.forEach((f, i) => {
     const x = (i % cols) * (size + gap), y = Math.floor(i / cols) * (size + gap);
     let c, a = 1;
-    if (f.status === "drafted") c = colors.draft;
+    if (f.status === "candidate") c = colors.ai;
+    else if (f.status === "reconstructing") { c = colors.ai; a = reducedMotion ? 1 : 0.55 + 0.45 * Math.sin(now / 260 + i); live = !reducedMotion; }
+    else if (f.status === "drafted") c = colors.draft;
     else if (f.status === "failed") c = colors.fail;
     else if (f.status === "matched") c = colors.match;
     else if (f.status === "asm") { c = colors.tried; a = 0.35; }
@@ -1178,7 +1180,7 @@ function drawMap() {
       if (t < 1 && !reducedMotion) {
         live = true;
         const g = size * (0.6 + 1.8 * t);
-        ctx.strokeStyle = rgb(S.ov?.kind === "analysis" ? colors.draft : colors.match, 1 - t);
+        ctx.strokeStyle = rgb(f.status === "candidate" ? colors.ai : S.ov?.kind === "analysis" ? colors.draft : colors.match, 1 - t);
         ctx.lineWidth = 2;
         ctx.beginPath(); ctx.roundRect(x - g / 2, y - g / 2, size + g, size + g, r + 2); ctx.stroke();
       } else S.flash.delete(f.name);

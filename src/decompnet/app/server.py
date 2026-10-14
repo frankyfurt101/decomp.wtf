@@ -192,7 +192,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             return {}
 
     from ..analysis.routes import register as register_analysis
-    register_analysis(mcp, home.parent, guard, _static)
+    analysis = register_analysis(mcp, home.parent, guard, _static)
 
     async def call(fn, *args):
         return await anyio.to_thread.run_sync(fn, *args)
@@ -932,6 +932,8 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         return JSONResponse({"ok": True})
 
     def shutdown_rooms() -> None:
+        analysis.stop()
+        analysis.reconstruction.stop()
         if share["tunnel"] is not None:
             share["tunnel"].stop()
         for link in list(net.links.values()):

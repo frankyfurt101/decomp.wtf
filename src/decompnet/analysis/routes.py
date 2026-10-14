@@ -4,10 +4,13 @@ from starlette.responses import JSONResponse, RedirectResponse
 
 from .engine import AnalysisEngine
 from .inputs import InputError
+from .reconstruct import ReconstructionEngine
 
 
 def register(mcp, home, guard, static):
     engine = AnalysisEngine(home / "switch-analysis")
+    reconstruction = ReconstructionEngine(engine)
+    engine.reconstruction = reconstruction
 
     @mcp.custom_route("/switch", methods=["GET"])
     async def page(request):
@@ -25,7 +28,10 @@ def register(mcp, home, guard, static):
         if bad := guard(request):
             return bad
         try:
-            return JSONResponse(await anyio.to_thread.run_sync(engine.snapshot, request.query_params.get("id", ""), False))
+            slug = request.query_params.get("id", "")
+            data = await anyio.to_thread.run_sync(engine.snapshot, slug, False)
+            data["ai"] = await anyio.to_thread.run_sync(reconstruction.snapshot, slug)
+            return JSONResponse(data)
         except (InputError, OSError, ValueError) as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -48,6 +54,7 @@ def register(mcp, home, guard, static):
             row = next((f for f in project["functions"] if f["address"] == address), None)
             if row is None:
                 raise InputError("function has not been drafted yet")
+            row["candidate"] = await anyio.to_thread.run_sync(reconstruction.candidate, request.query_params.get("id", ""), address)
             return JSONResponse(row)
         except (InputError, OSError, ValueError) as e:
             return JSONResponse({"error": str(e)}, status_code=400)
@@ -75,7 +82,7 @@ def register(mcp, home, guard, static):
             data = await request.json()
             if not isinstance(data, dict) or not isinstance(data.get("id"), str):
                 raise InputError("provide an analysis project id")
-            return JSONResponse(await anyio.to_thread.run_sync(engine.start, data["id"], data.get("limit", 64)))
+            return JSONResponse(await anyio.to_thread.run_sync(engine.start, data["id"], data.get("limit", 500), data.get("continuous", False)))
         except (InputError, OSError, ValueError) as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -88,6 +95,37 @@ def register(mcp, home, guard, static):
             if not isinstance(data, dict) or not isinstance(data.get("id"), str):
                 raise InputError("provide an analysis project id")
             return JSONResponse(await anyio.to_thread.run_sync(engine.cancel, data["id"]))
+        except (InputError, OSError, ValueError) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @mcp.custom_route("/api/switch/agent/config", methods=["GET"])
+    async def agent_config(request):
+        if bad := guard(request):
+            return bad
+        return JSONResponse(await anyio.to_thread.run_sync(reconstruction.config))
+
+    @mcp.custom_route("/api/switch/agent/start", methods=["POST"])
+    async def agent_start(request):
+        if bad := guard(request, write=True):
+            return bad
+        try:
+            data = await request.json()
+            if not isinstance(data, dict) or not isinstance(data.get("id"), str):
+                raise InputError("provide an analysis project id")
+            return JSONResponse(await anyio.to_thread.run_sync(reconstruction.start, data["id"],
+                                data.get("limit", 1), data.get("model", ""), data.get("address", "")))
+        except (InputError, OSError, ValueError) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @mcp.custom_route("/api/switch/agent/stop", methods=["POST"])
+    async def agent_stop(request):
+        if bad := guard(request, write=True):
+            return bad
+        try:
+            data = await request.json()
+            if not isinstance(data, dict) or not isinstance(data.get("id"), str):
+                raise InputError("provide an analysis project id")
+            return JSONResponse(await anyio.to_thread.run_sync(reconstruction.cancel, data["id"]))
         except (InputError, OSError, ValueError) as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 

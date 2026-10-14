@@ -16,3 +16,11 @@
 
 .analysis-project .ph-progress .meter i{background:var(--move)}
 #analysisLive.running .ap-icon{background:var(--work)}
+
+:root{--analysis-ai:#9157bd}
+.sw.candidate{background:var(--analysis-ai)}
+#analysisAgent{margin:16px 0}.analysis-agent-controls{display:flex;align-items:end;flex-wrap:wrap;gap:12px;padding:16px}
+.analysis-agent-controls label{display:grid;gap:6px;font-size:12px}.analysis-agent-controls select,.analysis-agent-controls input{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px;max-width:260px}
+#analysisAILimit{width:110px}.analysis-agent-note{margin:0;padding:0 16px 12px}.analysis-agent-feed{padding:0 16px 12px;line-height:1.6;overflow-wrap:anywhere}.analysis-keep{display:flex;align-items:center;gap:6px}
+#analysisSourceTabs{padding:12px 20px;flex-wrap:wrap}#analysisCandidateNotes{padding:16px 20px;line-height:1.6}#analysisCandidateNotes li{margin:6px 0;overflow-wrap:anywhere}
+@media(max-width:760px){.analysis-agent-controls{align-items:stretch}.analysis-agent-controls label{max-width:100%}.analysis-agent-controls select{max-width:100%}}
