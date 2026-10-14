@@ -2134,6 +2134,7 @@ async function showAgentsPage() {
   renderAgentsPage();
 }
 function renderAgentsPage() {
+  mountAgentsAntigravity($("agStartPanel"));
   const rows = S.st.agents.filter((a) => a.id !== "api");
   $("agList").innerHTML = rows.map((a) => `<div class="agent-row">
       <div class="ar-head"><b>${esc(a.name)}</b><span class="muted small">${esc(a.vendor)}</span><span class="grow"></span>

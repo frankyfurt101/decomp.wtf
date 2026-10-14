@@ -2,6 +2,62 @@
 /* Switch analysis adapts the original application views and canvas. No simulated work. */
 const AS = {polling:false, generation:0, catalog:[], catalogStamp:0, catalogTotal:0, seen:0, job:0, original:[], detailSerial:0, aiSeen:0, aiJob:0};
 const analysisActive = p => ["queued","analyzing","drafting"].includes(p.state);
+async function mountAgentsAntigravity(panel) {
+  const box=document.createElement('div');
+  panel.replaceChildren(box);
+  box.innerHTML='<header class="panel-head"><h2>Start Antigravity</h2></header><p class="pad muted small">Loading your Switch projects…</p>';
+  try {
+    const [cfg,{projects}]=await Promise.all([api('/api/switch/agent/config'),api('/api/switch/projects')]);
+    if(!box.isConnected)return;
+    if(!cfg.installed || !projects.length) {
+      box.innerHTML=`<header class="panel-head"><h2>Start Antigravity</h2></header><p class="pad muted small">${!cfg.installed?'Install Antigravity CLI and sign in to start a worker.':'Import a Switch executable and decompile some functions first. <a class="link" href="#/analysis">Open Switch analysis</a>'}</p>`;
+      return;
+    }
+    box.innerHTML=`<header class="panel-head"><h2>Start Antigravity</h2><span class="ok-mark">installed</span></header>
+      <form class="analysis-agent-controls">
+        <label>Switch project<select id="agStartProject">${projects.map(p=>`<option value="${esc(p.slug)}">${esc(p.title)}</option>`).join('')}</select></label>
+        <label>Model<select id="agStartModel"><option value="">Antigravity default</option>${cfg.models.map(m=>`<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('')}</select></label>
+        <label>Functions this run<input id="agStartLimit" type="number" min="1" max="20" step="1" value="1" required></label>
+        <button class="primary" id="agStartButton" type="submit" disabled>Checking project…</button>
+      </form>
+      <p class="analysis-agent-note muted small">Reconstruct decompiled functions using your signed-in Antigravity account. Opens the live function map; you can stop AI there. Candidates remain unverified.</p>
+      <p class="analysis-agent-note small" id="agStartStatus" role="status" aria-live="polite"></p>`;
+    const form=box.querySelector('form'),project=box.querySelector('#agStartProject'),model=box.querySelector('#agStartModel'),limit=box.querySelector('#agStartLimit'),button=box.querySelector('#agStartButton'),status=box.querySelector('#agStartStatus');
+    const preferred=cfg.models.find(m=>m.id===cfg.default_model)||cfg.models.find(m=>m.id.startsWith('gemini-'));
+    model.value=preferred?.id||'';
+    let serial=0,running=false,busy=false;
+    const checkProject=async()=>{
+      const request=++serial; button.disabled=true; button.textContent='Checking project…'; status.textContent='';
+      try {
+        const p=await api(`/api/switch/project?id=${encodeURIComponent(project.value)}`);
+        if(!box.isConnected || request!==serial)return;
+        running=['starting','reconstructing'].includes(p.ai?.state);
+        const drafted=projects.find(p=>p.slug===project.value)?.drafted||0;
+        button.textContent=running?'View Antigravity work':'Start Antigravity';
+        button.disabled=!running && !drafted;
+        model.disabled=limit.disabled=running;
+        status.textContent=running?'Antigravity is already working on this project.':drafted?'Ready. Click Start Antigravity to begin.':'Decompile functions in the project before starting Antigravity.';
+      } catch(e) {if(box.isConnected && request===serial){button.textContent='Start Antigravity';status.textContent=e.message;}}
+    };
+    project.onchange=checkProject;
+    form.onsubmit=async event=>{
+      event.preventDefault();
+      if(busy || button.disabled || !form.reportValidity())return;
+      const id=project.value;
+      if(running){location.hash=`#/analysis/${id}`;return;}
+      busy=true; button.disabled=true; project.disabled=model.disabled=limit.disabled=true;
+      button.textContent='Starting Antigravity…'; status.textContent='Launching the Antigravity worker…';
+      try {
+        await api('/api/switch/agent/start',{method:'POST',body:{id,limit:Number(limit.value),model:model.value}});
+        location.hash=`#/analysis/${id}`;
+      } catch(e) {
+        status.textContent=e.message;button.textContent='Start Antigravity';button.disabled=false;
+        project.disabled=model.disabled=limit.disabled=false;
+      } finally {busy=false;}
+    };
+    await checkProject();
+  } catch(e) {if(box.isConnected)box.innerHTML=`<header class="panel-head"><h2>Start Antigravity</h2></header><p class="pad small">${esc(e.message)} — use Refresh to retry.</p>`;}
+}
 const analysisStatus = status => ({drafted:'decompiled',working:'decompiling',reconstructing:'AI reconstructing',candidate:'AI candidate',open:'to do'}[status]||status);
 function analysisNav(p) {
   return `<a class="nav-proj" href="#/analysis/${esc(p.slug)}" data-slug="${esc(p.slug)}"><span class="np-top"><span class="np-name">${esc(p.title)}</span>${analysisActive(p)?'<span class="dot work" title="Ghidra is running"></span>':''}</span><span class="np-meta">Switch <span class="grow"></span>${p.drafted.toLocaleString()} decompiled</span></a>`;
