@@ -1,0 +1,36 @@
+# Managed by tools/reconcile.py in claude-reviewer-gh. Local edits are overwritten.
+#
+# Consumed through `uses:`, never actions/checkout: GitHub gives the runner a scoped,
+# read-only, one-hour installation token to download an action from a private
+# repository, so no PAT is needed and the reviewer repository stays private.
+name: claude-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    # Fork pull requests are not granted id-token: write, so federation cannot succeed.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: frankyfurt101/claude-reviewer-gh@23c52a96e42bcbbf703a2a36eaa8a3f4f98087a9  # pinned; bumped by tools/reconcile.py
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pr-number: ${{ github.event.pull_request.number }}
+          federation-rule-id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          organization-id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          service-account-id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          workspace-id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          homelab-repos: getquantumlabs/,frankyfurt101/
